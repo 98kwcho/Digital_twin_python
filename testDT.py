@@ -5,10 +5,11 @@ import threading
 import numpy as np
 import cv2
 
-# =======================
+# Melsec PLC
+import pymcprotocol as mc
+
 # Keras Classification
-# =======================
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 from PIL import Image, ImageOps
 
 MODEL_PATH = "keras_Model.h5"
@@ -17,11 +18,7 @@ LABEL_PATH = "labels.txt"
 model = load_model(MODEL_PATH, compile=False)
 class_names = open(LABEL_PATH, "r").readlines()
 
-
-#############################################
-# 0) 원본 이미지 전체를 분류 (keras 원본 코드 유지)
-#############################################
-
+# 0) 원본 이미지 전체를 분류 (keras 이용)
 def classify_whole_image(frame):
 
     pil_img = Image.fromarray(frame).convert("RGB")
@@ -42,11 +39,7 @@ def classify_whole_image(frame):
 
     return label, conf
 
-
-#############################################
 # 1) Robot Utility
-#############################################
-
 def IsMoveDone(indy_t):
     while True:
         status = indy_t.get_robot_status()
@@ -57,11 +50,7 @@ def IsMoveDone(indy_t):
 def grip(hold, indy_t):
     indy_t.set_do(2, hold)
 
-
-#############################################
 # 2) Box ROI 자동 검출
-#############################################
-
 def detect_box(image):
 
     orig = image.copy()
@@ -118,11 +107,7 @@ def detect_box(image):
 
     return roi, (x2, y2, w2, h2)
 
-
-#############################################
-# 3) ROI 내부 원형 물체 탐지 (분류 없음)
-#############################################
-
+# 3) ROI 내부 원형 물체 탐지 
 def detect_circles(roi):
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -150,24 +135,15 @@ def detect_circles(roi):
 
     return results
 
-
-#############################################
 # 4) Pixel → Meter 변환
-#############################################
-
 BOX_W = 0.085
 BOX_H = 0.150
-
 def pixel_to_meter(cx, cy, box_w_px, box_h_px):
     px = cx * (BOX_W / box_w_px)
     py = (box_h_px - cy) * (BOX_H / box_h_px)
     return px, py
 
-
-#############################################
 # 5) Cam → Robot 좌표 변환
-#############################################
-
 def conCamtoRobo(px, py):
     base_x = 0.50790
     base_y = -0.02140
@@ -180,12 +156,8 @@ def conCamtoRobo(px, py):
         -180, 0, 180
     ]
 
-
-#############################################
 # 6) Pick 동작
-#############################################
-
-def picknPlace(indy_t, pose):
+def picknPlace(indy_t, pose, label):
     indy_t.connect()
     indy_t.go_home()
     IsMoveDone(indy_t)
@@ -206,13 +178,24 @@ def picknPlace(indy_t, pose):
 
     indy_t.disconnect()
 
+# 7) PLC bit메모리 통신
+def plc_bitread (plc_t, str):
+    bit_vals = plc_t.batchread_bitunits(str, 1)
+    print("X7 bit:", bit_vals)
 
-#############################################
-# 7) 전체 파이프라인 MAIN
-#############################################
+    return bit_vals[0]
+ 
+def plc_bitwrite (plc_t, str, result):
+    plc_t.batchwrite_bitunits(str, result)
+    return
 
-def main_function(indy_t):
+# 8) 전체 파이프라인 MAIN
+def main_function(indy_t, plc_t):
 
+    # TODO 아래 대략적 과정을 PLC 에서 들어오는 신호(카메라 스톱퍼, 로봇 스톱퍼)에 따라 동작을 수행하게 한다.
+    # while True:
+    #----- 카메라 스톱퍼 실린더 신호 들어올 시 -----
+    # if plc_bitread(plc_t, "X7") == 1:
     cap = cv2.VideoCapture(0)
     ret, frame = cap.read()
     cap.release()
@@ -221,27 +204,19 @@ def main_function(indy_t):
         print("Camera Fail")
         return
 
-    # ----------------------------
-    # Step 1) 원본 분류
-    # ----------------------------
+    # Step 1) 원본 분류 O인지 X인지에 따라 pick 여부 결정 가능
     label, conf = classify_whole_image(frame)
     print(f"[CLASSIFY] → {label} , conf={conf:.3f}")
 
-    # O인지 X인지에 따라 pick 여부 결정 가능
-
-    # ----------------------------
     # Step 2) 상자 자동 검출
-    # ----------------------------
     roi, box_rect = detect_box(frame)
     if roi is None:
         print("상자 검출 실패")
         return
-    
+        
     x_box, y_box, w_box, h_box = box_rect
 
-    # ----------------------------
     # Step 3) 원형 탐지 (좌표용)
-    # ----------------------------
     circles = detect_circles(roi)
     if len(circles) == 0:
         print("원형 물체 없음")
@@ -250,30 +225,32 @@ def main_function(indy_t):
     d = circles[0]
     print(f"[CIRCLE] cx={d['cx']} cy={d['cy']} r={d['r']}")
 
-    # ----------------------------
     # Step 4) 픽셀 → 미터 변환
-    # ----------------------------
     px_m, py_m = pixel_to_meter(d["cx"], d["cy"], w_box, h_box)
 
-    # ----------------------------
     # Step 5) 카메라 → 로봇 좌표
-    # ----------------------------
     robot_pose = conCamtoRobo(px_m, py_m)
     print("Target Robot Pose:", robot_pose)
+    # ----- 카메라 스톱퍼 실린더 하강 후 컨베이어 벨트 동작 -----
 
-    # ----------------------------
+    # ----- 로봇 스톱퍼 신호 들어올 시 -----
+    # else if plc_bitread(plc_t, "X8") == 1:
     # Step 6) pick 동작
-    # ----------------------------
-    picknPlace(indy_t, robot_pose)
+    #picknPlace(indy_t, robot_pose, label)
+    #break
+    # ----- 로봇 스톱퍼 신호 해제 -----
 
-
-
-#############################################
 # 실행 시작
-#############################################
 
-robot_ip = "192.168.3.6"
+robot_ip = "192.168.3.6" # robot IP는 변경될 수 있음
 robot_name = "NRMK-Indy7"
-
 indy1 = client.IndyDCPClient(robot_ip, robot_name)
-main_function(indy1)
+
+plc = mc.Type3E()
+plc.setaccessopt(commtype="binary")
+plc.connect("192.168.3.120", 1025)      # PLC IP와 포트는 변경될 수 있음
+print("연결 성공")
+
+main_function(indy1, plc)
+
+plc.close()
