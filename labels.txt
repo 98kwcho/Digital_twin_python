@@ -1,0 +1,4 @@
+0 ok_w
+1 ng_w
+2 ok_b
+3 ng_b
