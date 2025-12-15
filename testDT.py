@@ -18,6 +18,13 @@ LABEL_PATH = "labels.txt"
 model = load_model(MODEL_PATH, compile=False)
 class_names = open(LABEL_PATH, "r").readlines()
 
+FIXED_BOX = {
+    "x": 120,
+    "y": 160,
+    "w": 400,
+    "h": 250
+}
+
 # 0) 원본 이미지 전체를 분류 (keras 이용)
 def classify_whole_image(frame):
 
@@ -52,60 +59,26 @@ def grip(hold, indy_t):
 
 # 2) Box ROI 자동 검출
 def detect_box(image):
-
     orig = image.copy()
-    h, w = image.shape[:2]
+    x = FIXED_BOX["x"]
+    y = FIXED_BOX["y"]
+    w = FIXED_BOX["w"]
+    h = FIXED_BOX["h"]
 
-    cut_top = int(h * 0.20)
-    work = image[cut_top:h]
+    # 이미지 경계 확인
+    img_h, img_w = orig.shape[:2]
 
-    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (7, 7), 0)
+    if (x + w > img_w) or (y + h > img_h):
+        print(f"경고: 박스가 이미지 범위를 벗어납니다. 이미지 크기: {img_w}x{img_h}, 박스: x={x}, y={y}, w={w}, h={h}")
+        # 안전한 경계로 조정
+        x = max(0, min(x, img_w - 1))
+        y = max(0, min(y, img_h - 1))
+        w = min(w, img_w - x)
+        h = min(h, img_h - y)
 
-    th = cv2.adaptiveThreshold(
-        blur, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY_INV,
-        35, 5
-    )
+    roi = orig[y:y+h, x:x+w]
 
-    kernel = np.ones((7,7), np.uint8)
-    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, 2)
-
-    contours,_ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best_area = 0
-    best_box = None
-
-    for cnt in contours:
-        x,y,w_box,h_box = cv2.boundingRect(cnt)
-        area = w_box*h_box
-        if area < 5000:
-            continue
-
-        aspect = w_box / float(h_box)
-        if 1.2 < aspect < 3.5:
-            if area > best_area:
-                best_area = area
-                best_box = (x,y,w_box,h_box)
-
-    if best_box is None:
-        return None, None
-
-    x,y,w_box,h_box = best_box
-    y = y + cut_top
-
-    mx = int(w_box * 0.05)
-    my = int(h_box * 0.08)
-
-    x2 = x + mx
-    y2 = y + my
-    w2 = w_box - mx * 2
-    h2 = h_box - my * 2
-
-    roi = orig[y2:y2+h2, x2:x2+w2]
-
-    return roi, (x2, y2, w2, h2)
+    return roi, (x, y, w, h)
 
 # 3) ROI 내부 원형 물체 탐지
 def detect_circles(roi):
@@ -136,8 +109,8 @@ def detect_circles(roi):
     return results
 
 # 4) Pixel → Meter 변환
-BOX_W = 0.135
-BOX_H = 0.150
+BOX_W = 0.150
+BOX_H = 0.085
 def pixel_to_meter(cx, cy, box_w_px, box_h_px):
     px = cx * (BOX_W / box_w_px)
     py = (box_h_px - cy) * (BOX_H / box_h_px)
@@ -145,13 +118,13 @@ def pixel_to_meter(cx, cy, box_w_px, box_h_px):
 
 # 5) Cam → Robot 좌표 변환
 def conCamtoRobo(px, py):
-    base_x = 0.4843
-    base_y = 0.2631
-    base_z = 0.500
+    base_x = 0.52446
+    base_y = 0.27
+    base_z = 0.340
 
     return [
-        base_x + px,
-        base_y + py,
+        base_x + py - 0.0130,
+        base_y + px + 0.0082,
         base_z,
         -180, 0, 180
     ]
@@ -161,14 +134,20 @@ def picknPlace(indy_t, pose, label):
 
     # 불량품인 경우
     if label == "1 ng_w" or label == "3 ng_b":
+        app = pose.copy()
+        tar = pose.copy()
+        ret = pose.copy()
+        tar[2] -= 0.07
+        ret[2] += 0.02
+        app2 = [0.18632, 0.37008, 0.4, -180, 0, 180]
+        tar2 = app2.copy()
+        tar2[2] -= 0.15
+
+
         indy_t.connect()
 
         indy_t.go_home()
         IsMoveDone(indy_t)
-
-        app = pose.copy()
-        tar = pose.copy()
-        tar[2] -= 0.230
 
         indy_t.task_move_to(app)
         IsMoveDone(indy_t)
@@ -178,42 +157,22 @@ def picknPlace(indy_t, pose, label):
 
         grip(True, indy_t)
 
-        indy_t.task_move_to(app)
+        indy_t.task_move_to(ret)
         IsMoveDone(indy_t)
 
-        indy_t.go_home()
+        indy_t.task_move_to(app2)
         IsMoveDone(indy_t)
 
-        grip(False, indy_t)
-
-        indy_t.disconnect()
-
-    elif label == "0 ok_w" or label == "2 ok_b":
-        indy_t.connect()
-
-        indy_t.go_home()
-        IsMoveDone(indy_t)
-
-        app = pose.copy()
-        tar = pose.copy()
-        tar[2] -= 0.230
-
-        indy_t.task_move_to(app)
-        IsMoveDone(indy_t)
-
-        indy_t.task_move_to(tar)
-        IsMoveDone(indy_t)
-
-        grip(True, indy_t)
-
-        indy_t.task_move_to(app)
-        IsMoveDone(indy_t)
-
-        indy_t.go_home()
+        indy_t.task_move_to(tar2)
         IsMoveDone(indy_t)
 
         grip(False, indy_t)
 
+        indy_t.task_move_to(app2)
+        IsMoveDone(indy_t)
+
+        indy_t.go_home()
+        IsMoveDone(indy_t)
         indy_t.disconnect()
 
     else :
@@ -221,7 +180,6 @@ def picknPlace(indy_t, pose, label):
 # 7) PLC bit메모리 통신
 def plc_bitread (plc_t, str):
     bit_vals = plc_t.batchread_bitunits(str, 1)
-
     return bit_vals[0]
 
 def plc_bitwrite (plc_t, str, result):
@@ -233,11 +191,10 @@ def main_function(indy_t, plc_t):
     cap = cv2.VideoCapture(0)
     # TODO 아래 대략적 과정을 PLC 에서 들어오는 신호(카메라 스톱퍼, 로봇 스톱퍼)에 따라 동작을 수행하게 한다.
     while True:
-        # if plc_bitread (plc_t, "M100") == 1: --> 시작신호
         #----- 카메라 스톱퍼 실린더 신호 들어올 시 -----
         if plc_bitread(plc_t, "B101") == 1:
             ret, frame = cap.read()
-            cap.release()
+
 
             if not ret:
                 print("Camera Fail")
@@ -270,8 +227,16 @@ def main_function(indy_t, plc_t):
             # Step 5) 카메라 → 로봇 좌표
             robot_pose = conCamtoRobo(px_m, py_m)
             print("Target Robot Pose:", robot_pose)
-            plc_bitwrite (plc_t, "B10E", 1)
-            break
+            cap.release()
+            if label == "1 ng_w" or label == "3 ng_b":
+                while plc_bitread(plc_t, "B110") == 0 :
+                    plc_bitwrite (plc_t, "B110", 1)
+                break
+
+            else :
+                while plc_bitread(plc_t, "B112") == 0 :
+                    plc_bitwrite (plc_t, "B112", 1)
+                break
         # ----- 카메라 스톱퍼 실린더 하강 후 컨베이어 벨트 동작 -----
 
         # ----- 로봇 스톱퍼 신호 들어올 시 -----
@@ -280,9 +245,16 @@ def main_function(indy_t, plc_t):
             print("로봇 동작")
             # Step 6) pick 동작
             picknPlace(indy_t, robot_pose, label)
-            plc_bitwrite (plc_t, "B10F", 1)
+
+            while plc_bitread(plc_t, "B111") == 0 :
+                plc_bitwrite (plc_t, "B111", 1)
+                sleep(0.5)
+
+            print("로봇 동작 over")
             break
 
+        elif  plc_bitread(plc_t, "B106") == 1:
+            break
         #break
         # ----- 로봇 스톱퍼 신호 해제 -----
 
